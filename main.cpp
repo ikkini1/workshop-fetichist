@@ -766,11 +766,7 @@ private:
 // Générateur de bruit blanc
 // --------------------------------------------------------
 
-uint32_t noiseState = 0xC1234567;
-
-// Source unique du Noise Morph : LFSR 16 bits à séquence maximale.
-// Le xorshift ci-dessus reste réservé au bruit blanc historique
-// utilisé en Play/Effets.
+// Source pseudo-aléatoire unique de tout le module : LFSR 16 bits.
 uint16_t noiseLfsrState = 0xACE1u;
 
 float previousWhiteNorm = 0.0f;
@@ -804,19 +800,36 @@ float rustCorrosionMix = 0.0f;
 int32_t previousEffectsMainPhysical = 0;
 int32_t previousEffectsXPhysical = 0;
 
+uint8_t NextLfsrBit()
+{
+    const uint8_t bit = static_cast<uint8_t>(noiseLfsrState & 1u);
+
+    noiseLfsrState = static_cast<uint16_t>(
+        (noiseLfsrState >> 1)
+        ^ (bit ? 0xB400u : 0u)
+    );
+
+    return bit;
+}
+
+uint16_t NextLfsrWord()
+{
+    uint16_t word = 0;
+
+    for (int i = 0; i < 10; ++i)
+        word = static_cast<uint16_t>((word << 1) | NextLfsrBit());
+
+    return word;
+}
+
 int16_t GenerateWhiteNoise()
 {
-    uint32_t x = noiseState;
+    const uint16_t word = NextLfsrWord();
 
-    x ^= x << 13;
-    x ^= x >> 17;
-    x ^= x << 5;
-
-    noiseState = x;
-
-    // Signal audio centré, amplitude modérée.
+    // Le bruit blanc est une conversion du flux LFSR,
+    // et non un second générateur pseudo-aléatoire.
     return static_cast<int16_t>(
-        static_cast<int32_t>(x & 0x03FFu) - 512
+        static_cast<int32_t>(word & 0x03FFu) - 512
     );
 }
 
@@ -826,25 +839,9 @@ int16_t GenerateWhiteNoise()
 
 int16_t GenerateNoiseMorph(int32_t morphValue)
 {
-    // Un mot de 10 bits est construit à partir du flux LFSR.
-    // Le premier bit sert aussi au mode LFSR brut.
-    uint16_t word = 0;
-    uint8_t firstBit = 0;
-
-    for (int i = 0; i < 10; ++i)
-    {
-        const uint16_t bit = noiseLfsrState & 1u;
-
-        noiseLfsrState = static_cast<uint16_t>(
-            (noiseLfsrState >> 1)
-            ^ (bit ? 0xB400u : 0u)
-        );
-
-        if (i == 0)
-            firstBit = static_cast<uint8_t>(bit);
-
-        word = static_cast<uint16_t>((word << 1) | bit);
-    }
+    // Le même flux LFSR fournit le mot blanc et sa forme brute.
+    const uint16_t word = NextLfsrWord();
+    const uint8_t firstBit = static_cast<uint8_t>((word >> 9) & 1u);
 
     const int16_t whiteSample = static_cast<int16_t>(
         static_cast<int32_t>(word & 0x03FFu) - 512
