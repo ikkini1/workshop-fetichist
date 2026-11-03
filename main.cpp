@@ -124,28 +124,32 @@ if (mode == Up)
 // Générateur de bruit
 // ----------------------------------------------------
 
-// En Play et Effets, on conserve le bruit blanc historique.
-// En Stop, Y pilote le morphing à partir d'une source LFSR unique.
+// En Stop et en Play, le même Noise Morph continue de tourner.
+// En Play, sa dernière valeur mémorisée est conservée : Y reste
+// affecté au Skip. En mode Effets, le bruit blanc historique demeure.
 // Les 90 premiers pour cent de Y parcourent les sept morphologies.
- // Les 10 derniers pour cent maintiennent Glitch et ralentissent le S&H.
+// Les 10 derniers pour cent maintiennent Glitch et ralentissent le S&H.
 const int32_t noiseMorphControl = noiseMorphValue;
 const int32_t morphValue = (noiseMorphControl >= 3686)
     ? 4095
     : (noiseMorphControl * 4095) / 3686;
 
 const int16_t noiseSample =
-    (mode == Up) ? GenerateNoiseMorph(morphValue, noiseMorphControl)
-                 : GenerateWhiteNoise();
+    (mode == Up || mode == Middle)
+        ? GenerateNoiseMorph(morphValue, noiseMorphControl)
+        : GenerateWhiteNoise();
 
 // Le bruit reste disponible indépendamment sur Audio 2 OUT.
 AudioOut2(noiseSample);
 
 // ----------------------------------------------------
-// Crossfader : mixer vers bruit blanc
+// Crossfader : mixer vers Noise Morph
 // ----------------------------------------------------
 
 // CV2 externe prioritaire.
 // Sinon, CV1 du séquenceur atténué par X.
+// X conserve dans tous les cas une fonction de coupure générale
+// à sa butée gauche.
 int32_t crossfadeCV;
 
 if (Connected(CV2))
@@ -162,6 +166,11 @@ else
         ? 0
         : (sequencerCV * sequencerXValue) / 4095;
 }
+
+// X à sa butée gauche coupe toujours le bruit du crossfader,
+// y compris lorsqu'une source CV externe est branchée sur CV2.
+if (sequencerXValue <= 32)
+    crossfadeCV = 0;
 
 // Limitation à la plage positive 0-5V.
 if (crossfadeCV < 0) crossfadeCV = 0;
@@ -318,6 +327,19 @@ if (previousMode == Down && mode == Middle)
     xPickupActive = true;
 }
 
+// Retour de Stop/Noise Morph vers Play : capturer les valeurs
+// mémorisées AVANT le traitement des positions physiques.
+if (previousMode == Up && mode == Middle)
+{
+    mainPickupTarget = sequencerMainValue;
+    xPickupTarget = sequencerXValue;
+    skipPickupTarget = skipValue;
+
+    mainPickupActive = true;
+    xPickupActive = true;
+    skipPickupActive = true;
+}
+
 // En mode Play, les potentiomètres doivent retrouver
 // leurs anciennes positions avant de reprendre le contrôle.
 if (mode == Middle)
@@ -378,19 +400,6 @@ if (previousMode == Middle && mode == Down)
 if (previousMode == Down && mode == Middle)
 {
     skipPickupTarget = skipValue;
-    skipPickupActive = true;
-}
-
-// Retour de Stop/Noise Morph vers Play : les trois commandes
-// retrouvent leurs valeurs mémorisées avant de reprendre le contrôle.
-if (previousMode == Up && mode == Middle)
-{
-    mainPickupTarget = sequencerMainValue;
-    xPickupTarget = sequencerXValue;
-    skipPickupTarget = skipValue;
-
-    mainPickupActive = true;
-    xPickupActive = true;
     skipPickupActive = true;
 }
 
