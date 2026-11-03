@@ -38,7 +38,7 @@ static const tusb_desc_device_t desc_device = {
 
     .idVendor = USB_VID,
     .idProduct = USB_PID,
-    .bcdDevice = 0x0104, // Bumped to force OS cache invalidation
+    .bcdDevice = 0x0105, // Force OS cache refresh for the composite MIDI + CDC descriptor
 
     .iManufacturer = STRING_MANUFACTURER,
     .iProduct = STRING_PRODUCT,
