@@ -63,6 +63,12 @@ public:
 
     void ProcessSample() override
     {
+        // Diagnostic temporaire : GPIO0 reste haut pendant le calcul DSP.
+        // GPIO1 signale au sample suivant si le calcul précédent a dépassé 41 us.
+        gpio_put(DEBUG_2, false);
+        const uint32_t diagnosticStartUs = time_us_32();
+        gpio_put(DEBUG_1, true);
+
         ++sampleCounter;
 
 // ----------------------------------------------------
@@ -461,6 +467,13 @@ previousMode = mode;
             envelope = 0.0f;
             CVOut2Millivolts(0);
 
+            // Même fermeture de mesure sur le chemin de retour anticipé (Z UP).
+            const uint32_t diagnosticDurationUs =
+                time_us_32() - diagnosticStartUs;
+            gpio_put(DEBUG_1, false);
+            if (diagnosticDurationUs > 41u)
+                gpio_put(DEBUG_2, true);
+
             return;
         }
 
@@ -762,6 +775,15 @@ if (led5Remaining > 0)
             static_cast<int32_t>(envelope * 5000.0f);
 
         CVOut2Millivolts(envelopeMillivolts);
+
+        // Fin de mesure : largeur GPIO0 = durée de ProcessSample().
+        // GPIO1 reste haut jusqu'au prochain appel si le budget de 41 us
+        // a été dépassé sur cet échantillon.
+        const uint32_t diagnosticDurationUs =
+            time_us_32() - diagnosticStartUs;
+        gpio_put(DEBUG_1, false);
+        if (diagnosticDurationUs > 41u)
+            gpio_put(DEBUG_2, true);
     }
 
 private:
