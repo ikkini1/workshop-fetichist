@@ -39,22 +39,15 @@ static std::atomic<bool> midiResetRequested{false};
 // DIAGNOSTIC TEMPOREL — mesures transmises par USB CDC
 // ============================================================
 
-struct ProcessSampleTimingBucket
+struct BufferFullTimingBucket
 {
-    std::atomic<uint32_t> sampleCount{0};
+    std::atomic<uint32_t> count{0};
     std::atomic<uint32_t> durationSumUs{0};
     std::atomic<uint32_t> durationMaxUs{0};
-    std::atomic<uint32_t> intervalCount{0};
-    std::atomic<uint32_t> intervalSumUs{0};
-    std::atomic<uint32_t> intervalMaxUs{0};
     std::atomic<uint32_t> overBudgetCount{0};
-    std::atomic<uint32_t> bufferDurationCount{0};
-    std::atomic<uint32_t> bufferDurationSumUs{0};
-    std::atomic<uint32_t> bufferDurationMaxUs{0};
-    std::atomic<uint32_t> bufferOverBudgetCount{0};
 };
 
-static ProcessSampleTimingBucket timingBuckets[3];
+static BufferFullTimingBucket timingBuckets[3];
 static std::atomic<bool> timingDiagnosticsEnabled{false};
 
 static void UpdateAtomicMax(std::atomic<uint32_t> &target, uint32_t value)
@@ -69,28 +62,6 @@ static void UpdateAtomicMax(std::atomic<uint32_t> &target, uint32_t value)
     }
 }
 
-static void RecordProcessSampleTiming(
-    uint8_t modeIndex,
-    uint32_t durationUs,
-    uint32_t intervalUs)
-{
-    ProcessSampleTimingBucket &bucket = timingBuckets[modeIndex];
-
-    bucket.sampleCount.fetch_add(1, std::memory_order_relaxed);
-    bucket.durationSumUs.fetch_add(durationUs, std::memory_order_relaxed);
-    UpdateAtomicMax(bucket.durationMaxUs, durationUs);
-
-    if (intervalUs > 0)
-    {
-        bucket.intervalCount.fetch_add(1, std::memory_order_relaxed);
-        bucket.intervalSumUs.fetch_add(intervalUs, std::memory_order_relaxed);
-        UpdateAtomicMax(bucket.intervalMaxUs, intervalUs);
-    }
-
-    if (durationUs > 41u)
-        bucket.overBudgetCount.fetch_add(1, std::memory_order_relaxed);
-}
-
 bool TimingDiagnosticsActive()
 {
     return timingDiagnosticsEnabled.load(std::memory_order_relaxed);
@@ -101,29 +72,22 @@ void RecordBufferFullTiming(uint8_t modeIndex, uint32_t durationUs)
     if (!timingDiagnosticsEnabled.load(std::memory_order_relaxed) || modeIndex >= 3)
         return;
 
-    ProcessSampleTimingBucket &bucket = timingBuckets[modeIndex];
-    bucket.bufferDurationCount.fetch_add(1, std::memory_order_relaxed);
-    bucket.bufferDurationSumUs.fetch_add(durationUs, std::memory_order_relaxed);
-    UpdateAtomicMax(bucket.bufferDurationMaxUs, durationUs);
+    BufferFullTimingBucket &bucket = timingBuckets[modeIndex];
+    bucket.count.fetch_add(1, std::memory_order_relaxed);
+    bucket.durationSumUs.fetch_add(durationUs, std::memory_order_relaxed);
+    UpdateAtomicMax(bucket.durationMaxUs, durationUs);
     if (durationUs > 41u)
-        bucket.bufferOverBudgetCount.fetch_add(1, std::memory_order_relaxed);
+        bucket.overBudgetCount.fetch_add(1, std::memory_order_relaxed);
 }
 
 static void ResetTimingDiagnostics()
 {
     for (auto &bucket : timingBuckets)
     {
-        bucket.sampleCount.store(0, std::memory_order_relaxed);
+        bucket.count.store(0, std::memory_order_relaxed);
         bucket.durationSumUs.store(0, std::memory_order_relaxed);
         bucket.durationMaxUs.store(0, std::memory_order_relaxed);
-        bucket.intervalCount.store(0, std::memory_order_relaxed);
-        bucket.intervalSumUs.store(0, std::memory_order_relaxed);
-        bucket.intervalMaxUs.store(0, std::memory_order_relaxed);
         bucket.overBudgetCount.store(0, std::memory_order_relaxed);
-        bucket.bufferDurationCount.store(0, std::memory_order_relaxed);
-        bucket.bufferDurationSumUs.store(0, std::memory_order_relaxed);
-        bucket.bufferDurationMaxUs.store(0, std::memory_order_relaxed);
-        bucket.bufferOverBudgetCount.store(0, std::memory_order_relaxed);
     }
 }
 
@@ -135,51 +99,29 @@ static void SendTimingDiagnostics()
 
     for (uint8_t i = 0; i < 3; ++i)
     {
-        ProcessSampleTimingBucket &bucket = timingBuckets[i];
+        BufferFullTimingBucket &bucket = timingBuckets[i];
 
-        const uint32_t samples =
-            bucket.sampleCount.exchange(0, std::memory_order_relaxed);
+        const uint32_t count =
+            bucket.count.exchange(0, std::memory_order_relaxed);
         const uint32_t durationSum =
             bucket.durationSumUs.exchange(0, std::memory_order_relaxed);
         const uint32_t durationMax =
             bucket.durationMaxUs.exchange(0, std::memory_order_relaxed);
-        const uint32_t intervals =
-            bucket.intervalCount.exchange(0, std::memory_order_relaxed);
-        const uint32_t intervalSum =
-            bucket.intervalSumUs.exchange(0, std::memory_order_relaxed);
-        const uint32_t intervalMax =
-            bucket.intervalMaxUs.exchange(0, std::memory_order_relaxed);
         const uint32_t overBudget =
             bucket.overBudgetCount.exchange(0, std::memory_order_relaxed);
-        const uint32_t bufferCount =
-            bucket.bufferDurationCount.exchange(0, std::memory_order_relaxed);
-        const uint32_t bufferDurationSum =
-            bucket.bufferDurationSumUs.exchange(0, std::memory_order_relaxed);
-        const uint32_t bufferDurationMax =
-            bucket.bufferDurationMaxUs.exchange(0, std::memory_order_relaxed);
-        const uint32_t bufferOverBudget =
-            bucket.bufferOverBudgetCount.exchange(0, std::memory_order_relaxed);
 
-        if (samples == 0)
+        if (count == 0)
             continue;
 
-        char line[192];
+        char line[128];
         const int length = std::snprintf(
             line, sizeof(line),
-            "TIMING,%s,n=%lu,dur_avg=%lu,dur_max=%lu,"
-            "period_avg=%lu,period_max=%lu,over41=%lu,"
-            "buffer_avg=%lu,buffer_max=%lu,buffer_over41=%lu\r\n",
+            "CALLBACK,%s,n=%lu,avg=%lu,max=%lu,over41=%lu\\r\\n",
             modeNames[i],
-            static_cast<unsigned long>(samples),
-            static_cast<unsigned long>(durationSum / samples),
+            static_cast<unsigned long>(count),
+            static_cast<unsigned long>(durationSum / count),
             static_cast<unsigned long>(durationMax),
-            static_cast<unsigned long>(
-                intervals ? intervalSum / intervals : 0),
-            static_cast<unsigned long>(intervalMax),
-            static_cast<unsigned long>(overBudget),
-            static_cast<unsigned long>(bufferCount ? bufferDurationSum / bufferCount : 0),
-            static_cast<unsigned long>(bufferDurationMax),
-            static_cast<unsigned long>(bufferOverBudget));
+            static_cast<unsigned long>(overBudget));
 
         if (length > 0
             && static_cast<uint32_t>(length) <= tud_cdc_write_available())
@@ -219,29 +161,6 @@ public:
 
     void ProcessSample() override
     {
-        const bool timingEnabled =
-            timingDiagnosticsEnabled.load(std::memory_order_relaxed);
-        const uint32_t diagnosticStartUs =
-            timingEnabled ? time_us_32() : 0u;
-
-        // Mesure l'intervalle entre deux débuts consécutifs de ProcessSample.
-        // La mesure est réinitialisée lorsque le terminal série est fermé.
-        static uint32_t previousDiagnosticStartUs = 0;
-        uint32_t diagnosticIntervalUs = 0;
-
-        if (timingEnabled)
-        {
-            if (previousDiagnosticStartUs != 0)
-                diagnosticIntervalUs =
-                    diagnosticStartUs - previousDiagnosticStartUs;
-
-            previousDiagnosticStartUs = diagnosticStartUs;
-        }
-        else
-        {
-            previousDiagnosticStartUs = 0;
-        }
-
         ++sampleCounter;
 
 // ----------------------------------------------------
@@ -267,8 +186,6 @@ if (mixerOutput < -2048)
 // Lecture anticipée : le bruit est calculé avant le reste du DSP,
 // mais le séquenceur réutilise exactement ces mêmes valeurs.
 const Switch mode = SwitchVal();
-const uint8_t diagnosticModeIndex =
-    (mode == Down) ? 0u : ((mode == Middle) ? 1u : 2u);
 const int32_t yValue = KnobVal(Y);
 
 if (!noiseMorphInitialized)
@@ -642,16 +559,6 @@ previousMode = mode;
             envelope = 0.0f;
             CVOut2Millivolts(0);
 
-            if (timingEnabled)
-            {
-                const uint32_t diagnosticDurationUs =
-                    time_us_32() - diagnosticStartUs;
-                RecordProcessSampleTiming(
-                    diagnosticModeIndex,
-                    diagnosticDurationUs,
-                    diagnosticIntervalUs);
-            }
-
             return;
         }
 
@@ -954,15 +861,6 @@ if (led5Remaining > 0)
 
         CVOut2Millivolts(envelopeMillivolts);
 
-        if (timingEnabled)
-        {
-            const uint32_t diagnosticDurationUs =
-                time_us_32() - diagnosticStartUs;
-            RecordProcessSampleTiming(
-                diagnosticModeIndex,
-                diagnosticDurationUs,
-                diagnosticIntervalUs);
-        }
     }
 
 private:
