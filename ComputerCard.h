@@ -21,6 +21,9 @@ See examples/ directory
 #include "hardware/gpio.h"
 #include "hardware/pwm.h"
 
+bool TimingDiagnosticsActive();
+void RecordBufferFullTiming(uint8_t modeIndex, uint32_t durationUs);
+
 #define PULSE_1_RAW_OUT 8
 #define PULSE_2_RAW_OUT 9
 
@@ -657,6 +660,9 @@ void __not_in_flash_func(ComputerCard::CorrectADCDNL)(uint16_t &value) const
 // Per-audio-sample ISR, called when two sets of ADC samples have been collected from all four inputs
 void __not_in_flash_func(ComputerCard::BufferFull)()
 {
+	const bool timingEnabled = TimingDiagnosticsActive();
+	const uint32_t bufferStartUs = timingEnabled ? time_us_32() : 0u;
+
 	static int startupCounter = 8; // Decreases by 1 each sample, can do startup things when nonzero.
 	static int mux_state = 0;
 	static int norm_probe_count = 0;
@@ -831,6 +837,13 @@ void __not_in_flash_func(ComputerCard::BufferFull)()
 	norm_probe_count = (norm_probe_count + 1) & 0xF;
 
 	lastSwitchVal = switchVal;
+
+	if (timingEnabled)
+	{
+		const uint8_t modeIndex =
+			(switchVal == Down) ? 0u : ((switchVal == Middle) ? 1u : 2u);
+		RecordBufferFullTiming(modeIndex, time_us_32() - bufferStartUs);
+	}
 	
 	if (startupCounter) startupCounter--;
 }
