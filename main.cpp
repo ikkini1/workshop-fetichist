@@ -85,7 +85,7 @@ if (mixerOutput < -2048)
 // Générateur de bruit blanc
 // ----------------------------------------------------
 
-const int16_t noiseSample = GenerateWhiteNoise();
+const int16_t noiseSample = GenerateNoiseMorph(noiseMorphValue);
 
 // Le bruit reste disponible indépendamment sur Audio 2 OUT.
 AudioOut2(noiseSample);
@@ -209,6 +209,26 @@ AudioOut1(static_cast<int16_t>(finalOutput));
 const int32_t physicalMainValue = KnobVal(Main);
 const int32_t physicalXValue = KnobVal(X);
 const int32_t yValue = KnobVal(Y);
+
+// ----------------------------------------------------
+// Noise Morph : valeur mémorisée et reprise par pickup
+// ----------------------------------------------------
+
+if (!noiseMorphInitialized)
+{
+    // Au démarrage, la position physique de Y définit
+    // la première couleur de bruit.
+    noiseMorphValue = yValue;
+    noiseMorphInitialized = true;
+}
+
+// En entrant dans Z UP, Y doit retrouver sa dernière
+// position mémorisée avant de reprendre le contrôle.
+if (mode == Up && previousMode != Up)
+{
+    noisePickupTarget = noiseMorphValue;
+    noisePickupActive = true;
+}
 
 // Gestion relative des effets en mode Down.
 if (mode == Down && previousMode != Down)
@@ -367,6 +387,23 @@ if (mode == Down)
     else
     {
         currentBpm = 20 + static_cast<int>((yValue * 280) / 4095);
+    }
+}
+
+// En Z UP, Y pilote le Noise Morph uniquement après pickup.
+if (mode == Up)
+{
+    if (noisePickupActive)
+    {
+        if (abs(yValue - noisePickupTarget) <= 16)
+        {
+            noiseMorphValue = yValue;
+            noisePickupActive = false;
+        }
+    }
+    else
+    {
+        noiseMorphValue = yValue;
     }
 }
 
@@ -722,10 +759,35 @@ private:
     }
 
     // --------------------------------------------------------
-// Générateur de bruit blanc
+// Source de bruit et algorithmes de Noise Morph
 // --------------------------------------------------------
 
 uint32_t noiseState = 0xC1234567;
+uint16_t lfsrState = 0xACE1u;
+uint32_t glitchRandomState = 0x6D2B79F5u;
+
+float previousWhiteNorm = 0.0f;
+
+// États du filtre Pink Noise (Paul Kellet).
+float pinkB0 = 0.0f;
+float pinkB1 = 0.0f;
+float pinkB2 = 0.0f;
+float pinkB3 = 0.0f;
+float pinkB4 = 0.0f;
+float pinkB5 = 0.0f;
+float pinkB6 = 0.0f;
+
+// Intégrateur avec fuite pour le Brown Noise.
+float brownState = 0.0f;
+
+// Sample & Hold : horloge interne fixe à 12 kHz,
+// indépendante des horloges du séquenceur.
+uint8_t sampleHoldCounter = 1;
+int16_t sampleHoldValue = 0;
+
+// Glitch / Burst Noise : rafales pseudo-aléatoires.
+uint32_t glitchCounter = 0;
+bool glitchActive = false;
 
 // ----------------------------------------------------
 // Paramètres des effets Rust / Corrosion
@@ -750,6 +812,120 @@ int16_t GenerateWhiteNoise()
     return static_cast<int16_t>(
         static_cast<int32_t>(x & 0x03FFu) - 512
     );
+}
+
+int16_t GenerateNoiseMorph(int32_t morphValue)
+{
+    // Une seule source de bruit blanc alimente les traitements
+    // spectraux et le Sample & Hold.
+    const int16_t whiteSample = GenerateWhiteNoise();
+    const float white = static_cast<float>(whiteSample) / 512.0f;
+
+    // Conversion commune avec limitation pour garder des niveaux
+    // comparables entre les différentes couleurs de bruit.
+    const auto toSample = [](float value) -> int16_t
+    {
+        if (value > 1.0f) value = 1.0f;
+        if (value < -1.0f) value = -1.0f;
+        return static_cast<int16_t>(value * 512.0f);
+    };
+
+    // 1. BLUE : différence entre deux échantillons successifs.
+    const float blue = (white - previousWhiteNorm) * 0.70710678f;
+    previousWhiteNorm = white;
+
+    // 2. WHITE : source de référence.
+    // (La valeur white est déjà disponible.)
+
+    // 3. PINK : filtre de Paul Kellet, approximant une pente 1/f.
+    pinkB0 = 0.99886f * pinkB0 + white * 0.0555179f;
+    pinkB1 = 0.99332f * pinkB1 + white * 0.0750759f;
+    pinkB2 = 0.96900f * pinkB2 + white * 0.1538520f;
+    pinkB3 = 0.86650f * pinkB3 + white * 0.3104856f;
+    pinkB4 = 0.55000f * pinkB4 + white * 0.5329522f;
+    pinkB5 = -0.7616f * pinkB5 - white * 0.0168980f;
+    pinkB6 = white * 0.115926f;
+
+    const float pink =
+        (pinkB0 + pinkB1 + pinkB2 + pinkB3
+         + pinkB4 + pinkB5 + pinkB6 + white * 0.5362f) * 0.11f;
+
+    // 4. BROWN : intégration avec une très légère fuite
+    // pour éviter toute dérive continue.
+    brownState = brownState * 0.9995f + white * 0.03162f;
+
+    // 5. LFSR : bruit numérique à deux niveaux, produit par
+    // un registre à décalage 16 bits (polynôme maximal).
+    const uint16_t lfsrBit = lfsrState & 1u;
+    lfsrState = static_cast<uint16_t>(
+        (lfsrState >> 1) ^ (lfsrBit ? 0xB400u : 0u)
+    );
+    const float lfsr =
+        (static_cast<float>(lfsrState) / 32768.0f) - 1.0f;
+
+    // 6. SAMPLE & HOLD : nouvelle valeur toutes les deux
+    // périodes audio, soit une clock interne de 12 kHz.
+    if (++sampleHoldCounter >= 2)
+    {
+        sampleHoldCounter = 0;
+        sampleHoldValue = whiteSample;
+    }
+    const float sampleHold =
+        static_cast<float>(sampleHoldValue) / 512.0f;
+
+    // 7. GLITCH / BURST : rafales de bruit séparées par
+    // des micro-silences, avec durées pseudo-aléatoires.
+    if (glitchCounter == 0)
+    {
+        glitchRandomState ^= glitchRandomState << 13;
+        glitchRandomState ^= glitchRandomState >> 17;
+        glitchRandomState ^= glitchRandomState << 5;
+
+        // Environ 75 % de rafales actives.
+        glitchActive = (glitchRandomState & 0x03u) != 0u;
+        glitchCounter = 1u + ((glitchRandomState >> 8) % 48u);
+    }
+
+    --glitchCounter;
+
+    const float glitch =
+        glitchActive ? white * 1.15f : 0.0f;
+
+    // Ordre sur la course de Y :
+    // Blue > White > Pink > Brown > LFSR > S&H > Glitch.
+    const int16_t noiseTypes[7] =
+    {
+        toSample(blue),
+        toSample(white),
+        toSample(pink),
+        toSample(brownState),
+        toSample(lfsr),
+        toSample(sampleHold),
+        toSample(glitch)
+    };
+
+    if (morphValue < 0) morphValue = 0;
+    if (morphValue > 4095) morphValue = 4095;
+
+    // Six intervalles continus entre les sept couleurs.
+    const int32_t scaledPosition = morphValue * 6;
+    int index = static_cast<int>(scaledPosition / 4095);
+    float blend = static_cast<float>(scaledPosition % 4095) / 4095.0f;
+
+    if (index >= 6)
+    {
+        index = 6;
+        blend = 0.0f;
+    }
+
+    const int nextIndex = (index < 6) ? index + 1 : index;
+
+    // Fondu linéaire entre deux traitements voisins.
+    const float output =
+        static_cast<float>(noiseTypes[index]) * (1.0f - blend)
+        + static_cast<float>(noiseTypes[nextIndex]) * blend;
+
+    return static_cast<int16_t>(output);
 }
 
 /// ----------------------------------------------------
@@ -996,6 +1172,12 @@ int32_t xPickupTarget = 0;
 bool mainPickupActive = false;
 bool xPickupActive = false;
 bool controlPickupInitialized = false;
+
+// Noise Morph : réglage indépendant des valeurs Skip et Tempo.
+int32_t noiseMorphValue = 0;
+int32_t noisePickupTarget = 0;
+bool noisePickupActive = false;
+bool noiseMorphInitialized = false;
 
     uint32_t internalCounter = 0;
     uint32_t internalLedCounter = 0;
