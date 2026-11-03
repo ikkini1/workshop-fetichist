@@ -163,7 +163,7 @@ static void SendTimingDiagnostics()
         if (samples == 0)
             continue;
 
-        char line[128];
+        char line[192];
         const int length = std::snprintf(
             line, sizeof(line),
             "TIMING,%s,n=%lu,dur_avg=%lu,dur_max=%lu,"
