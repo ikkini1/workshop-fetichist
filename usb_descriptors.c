@@ -13,6 +13,7 @@ enum {
     STRING_MANUFACTURER,
     STRING_PRODUCT,
     STRING_SERIAL,
+    STRING_CDC,
     STRING_MIDI,
     STRING_LAST
 };
@@ -21,6 +22,7 @@ static const char *const string_desc_arr[] = {
     [STRING_MANUFACTURER] = "Music Thing",
     [STRING_PRODUCT]      = "Clockwork MIDI",
     [STRING_SERIAL]       = NULL, // Dynamic using flash ID
+    [STRING_CDC]          = "Timing diagnostics",
     [STRING_MIDI]         = "Clockwork MIDI"
 };
 
@@ -51,23 +53,36 @@ uint8_t const *tud_descriptor_device_cb(void) {
 
 // Interfaces
 enum {
-    ITF_NUM_MIDI = 0,
+    ITF_NUM_CDC = 0,
+    ITF_NUM_CDC_DATA,
+    ITF_NUM_MIDI,
     ITF_NUM_MIDI_STREAMING,
     ITF_NUM_TOTAL
 };
 
 // Endpoints
+#define USBD_CDC_EP_NOTIF        0x82
+#define USBD_CDC_EP_OUT          0x03
+#define USBD_CDC_EP_IN           0x83
 #define USBD_MIDI_EP_OUT         0x01
 #define USBD_MIDI_EP_IN          0x81
 
-#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_MIDI_DESC_LEN)
+#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN + TUD_MIDI_DESC_LEN)
 
 static const uint8_t desc_fs_configuration[] = {
     // Config number, interface count, string index, total length, attribute, power in mA
     TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN, 0x00, 250),
 
-    // Interface number, string index, EP Out & EP In address, EP size
-    TUD_MIDI_DESCRIPTOR(ITF_NUM_MIDI, STRING_MIDI, USBD_MIDI_EP_OUT, USBD_MIDI_EP_IN, 64)
+    // Port série CDC pour les mesures de diagnostic.
+    TUD_CDC_DESCRIPTOR(
+        ITF_NUM_CDC, STRING_CDC,
+        USBD_CDC_EP_NOTIF, 8,
+        USBD_CDC_EP_OUT, USBD_CDC_EP_IN, 64),
+
+    // Interface MIDI conservée pour la réception de l'horloge MIDI.
+    TUD_MIDI_DESCRIPTOR(
+        ITF_NUM_MIDI, STRING_MIDI,
+        USBD_MIDI_EP_OUT, USBD_MIDI_EP_IN, 64)
 };
 
 uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
