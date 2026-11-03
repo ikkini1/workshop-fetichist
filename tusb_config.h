@@ -24,7 +24,7 @@
 #endif
 
 // Enable CDC and MIDI class drivers
-#define CFG_TUD_CDC               0
+#define CFG_TUD_CDC               1
 #define CFG_TUD_MIDI              1
 
 // MIDI FIFO size
