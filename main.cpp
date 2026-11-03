@@ -116,7 +116,7 @@ static void SendTimingDiagnostics()
         char line[128];
         const int length = std::snprintf(
             line, sizeof(line),
-            "CALLBACK,%s,n=%lu,avg=%lu,max=%lu,over41=%lu\\r\\n",
+            "CALLBACK,%s,n=%lu,avg=%lu,max=%lu,over41=%lu\r\n",
             modeNames[i],
             static_cast<unsigned long>(count),
             static_cast<unsigned long>(durationSum / count),
