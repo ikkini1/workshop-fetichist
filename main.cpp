@@ -126,8 +126,15 @@ if (mode == Up)
 
 // En Play et Effets, on conserve le bruit blanc historique.
 // En Stop, Y pilote le morphing à partir d'une source LFSR unique.
+// Les 90 premiers pour cent de Y parcourent les sept morphologies.
+ // Les 10 derniers pour cent maintiennent Glitch et ralentissent le S&H.
+const int32_t noiseMorphControl = noiseMorphValue;
+const int32_t morphValue = (noiseMorphControl >= 3686)
+    ? 4095
+    : (noiseMorphControl * 4095) / 3686;
+
 const int16_t noiseSample =
-    (mode == Up) ? GenerateNoiseMorph(noiseMorphValue)
+    (mode == Up) ? GenerateNoiseMorph(morphValue, noiseMorphControl)
                  : GenerateWhiteNoise();
 
 // Le bruit reste disponible indépendamment sur Audio 2 OUT.
@@ -149,8 +156,11 @@ else
 {
     // X du séquenceur reste mémorisé en mode Down,
     // mais les nouvelles valeurs de CV continuent d'agir.
-    crossfadeCV =
-        (sequencerCV * sequencerXValue) / 4095;
+    // Petite zone morte en bas de X : garantit un silence du bruit
+    // sur Audio 1 lorsque le potentiomètre est complètement à gauche.
+    crossfadeCV = (sequencerXValue <= 32)
+        ? 0
+        : (sequencerCV * sequencerXValue) / 4095;
 }
 
 // Limitation à la plage positive 0-5V.
@@ -333,14 +343,8 @@ if (mode == Middle)
     }
 }
 
-// En mode Stop, on prépare une reprise sans saut.
-if (mode == Up)
-{
-    sequencerMainValue = physicalMainValue;
-    sequencerXValue = physicalXValue;
-    mainPickupActive = false;
-    xPickupActive = false;
-}
+// En mode Stop, Main et X restent mémorisés.
+ // Ils ne sont pas remplacés par les positions physiques des potentiomètres.
 
         // Initialise la mémoire du Skip au démarrage.
 // Initialisation des valeurs mémorisées.
@@ -374,6 +378,19 @@ if (previousMode == Middle && mode == Down)
 if (previousMode == Down && mode == Middle)
 {
     skipPickupTarget = skipValue;
+    skipPickupActive = true;
+}
+
+// Retour de Stop/Noise Morph vers Play : les trois commandes
+// retrouvent leurs valeurs mémorisées avant de reprendre le contrôle.
+if (previousMode == Up && mode == Middle)
+{
+    mainPickupTarget = sequencerMainValue;
+    xPickupTarget = sequencerXValue;
+    skipPickupTarget = skipValue;
+
+    mainPickupActive = true;
+    xPickupActive = true;
     skipPickupActive = true;
 }
 
@@ -784,7 +801,7 @@ float pinkB6 = 0.0f;
 float brownState = 0.0f;
 
 // Sample & Hold à 12 kHz, indépendant du séquenceur.
-uint8_t sampleHoldCounter = 0;
+uint16_t sampleHoldCounter = 0;
 int16_t sampleHoldValue = 0;
 
 // Glitch : les décisions sont tirées dans le même flux LFSR.
@@ -837,7 +854,7 @@ int16_t GenerateWhiteNoise()
 // Noise Morph : une source LFSR, un réseau de traitement
 // ----------------------------------------------------
 
-int16_t GenerateNoiseMorph(int32_t morphValue)
+int16_t GenerateNoiseMorph(int32_t morphValue, int32_t yControlValue)
 {
     // Le même flux LFSR fournit le mot blanc et sa forme brute.
     const uint16_t word = NextLfsrWord();
@@ -871,11 +888,26 @@ int16_t GenerateNoiseMorph(int32_t morphValue)
         (pinkB0 + pinkB1 + pinkB2 + pinkB3
          + pinkB4 + pinkB5 + pinkB6 + white * 0.5362f) * 0.11f;
 
-    // Brown : intégration avec fuite du signal Pink.
-    brownState = brownState * 0.9995f + pink * 0.0158114f;
+    // Brown : intégration avec fuite du bruit blanc.
+    // L'intégration du Pink rendait le spectre trop sombre (énergie
+    // concentrée très bas) et provoquait une forte baisse de niveau perçue.
+    brownState = brownState * 0.9995f + white * 0.0158114f;
 
-    // S&H : capture toutes les deux périodes audio (12 kHz à 24 kHz).
-    if (++sampleHoldCounter >= 2)
+    // S&H : 12 kHz au début de la zone dédiée, puis ralentissement
+    // progressif sur les derniers 10 % de la course de Y jusqu'à 1 Hz.
+    const int32_t slowZoneStart = 3686;
+    const int32_t slowZoneRange = 4095 - slowZoneStart;
+    int32_t slowAmount = yControlValue - slowZoneStart;
+    if (slowAmount < 0) slowAmount = 0;
+    if (slowAmount > slowZoneRange) slowAmount = slowZoneRange;
+
+    const uint32_t sampleHoldPeriod = 2u +
+        static_cast<uint32_t>(
+            (static_cast<uint64_t>(23998u) * slowAmount * slowAmount) /
+            (static_cast<uint64_t>(slowZoneRange) * slowZoneRange)
+        );
+
+    if (++sampleHoldCounter >= sampleHoldPeriod)
     {
         sampleHoldCounter = 0;
         sampleHoldValue = whiteSample;
