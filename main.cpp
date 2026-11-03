@@ -856,8 +856,9 @@ int16_t GenerateNoiseMorph(int32_t morphValue)
     const float lfsrRaw = firstBit ? 1.0f : -1.0f;
 
     // Blue : dérivée première du même flux blanc.
+    const float previousWhite = previousWhiteNorm;
     const float blue =
-        (white - previousWhiteNorm) * 0.70710678f;
+        (white - previousWhite) * 0.70710678f;
     previousWhiteNorm = white;
 
     // Pink : filtre spectral multi-pôles, alimenté par le même flux.
@@ -924,9 +925,7 @@ int16_t GenerateNoiseMorph(int32_t morphValue)
     {
         // Blue -> White : la quantité de dérivation diminue jusqu'au bypass.
         const float position = static_cast<float>(morphValue) / 1024.0f;
-        const float highPassAmount = 1.0f - position;
-        output = white - highPassAmount * previousWhiteNorm;
-        output *= 0.70710678f;
+        output = blue + (white - blue) * position;
     }
     else if (morphValue < 2048)
     {
