@@ -198,7 +198,7 @@ const float mixedOutput =
 // Les effets ne sont actifs qu'en position Z DOWN.
 // Hors de ce mode, on les contourne complètement : cela évite
 // d'exécuter powf() et tanhf() dans le moteur audio pour rien.
-const float dryWet = (mode == Down) ? effectsDryWet : 0.0f;
+const float dryWet = effectsDryWet;
 const float effectMix = rustCorrosionMix;
 
 // Par défaut, le signal reste entièrement sec.
