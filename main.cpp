@@ -82,10 +82,53 @@ if (mixerOutput < -2048)
     mixerOutput = -2048;
 
 // ----------------------------------------------------
-// Générateur de bruit blanc
+// Commande Z/Y et Noise Morph
 // ----------------------------------------------------
 
-const int16_t noiseSample = GenerateWhiteNoise();
+// Lecture anticipée : le bruit est calculé avant le reste du DSP,
+// mais le séquenceur réutilise exactement ces mêmes valeurs.
+const Switch mode = SwitchVal();
+const int32_t yValue = KnobVal(Y);
+
+if (!noiseMorphInitialized)
+{
+    noiseMorphValue = yValue;
+    noiseMorphInitialized = true;
+}
+
+// À l'entrée en Stop (Z UP), Y doit retrouver la dernière
+// valeur mémorisée avant de reprendre le contrôle.
+if (mode == Up && previousMode != Up)
+{
+    noisePickupTarget = noiseMorphValue;
+    noisePickupActive = true;
+}
+
+if (mode == Up)
+{
+    if (noisePickupActive)
+    {
+        if (abs(yValue - noisePickupTarget) <= 16)
+        {
+            noiseMorphValue = yValue;
+            noisePickupActive = false;
+        }
+    }
+    else
+    {
+        noiseMorphValue = yValue;
+    }
+}
+
+// ----------------------------------------------------
+// Générateur de bruit
+// ----------------------------------------------------
+
+// En Play et Effets, on conserve le bruit blanc historique.
+// En Stop, Y pilote le morphing à partir d'une source LFSR unique.
+const int16_t noiseSample =
+    (mode == Up) ? GenerateNoiseMorph(noiseMorphValue)
+                 : GenerateWhiteNoise();
 
 // Le bruit reste disponible indépendamment sur Audio 2 OUT.
 AudioOut2(noiseSample);
@@ -205,10 +248,8 @@ AudioOut1(static_cast<int16_t>(finalOutput));
         // Lecture des commandes physiques
         // ----------------------------------------------------
 
-        const Switch mode = SwitchVal();
-const int32_t physicalMainValue = KnobVal(Main);
+        const int32_t physicalMainValue = KnobVal(Main);
 const int32_t physicalXValue = KnobVal(X);
-const int32_t yValue = KnobVal(Y);
 
 // Gestion relative des effets en mode Down.
 if (mode == Down && previousMode != Down)
@@ -727,6 +768,33 @@ private:
 
 uint32_t noiseState = 0xC1234567;
 
+// Source unique du Noise Morph : LFSR 16 bits à séquence maximale.
+// Le xorshift ci-dessus reste réservé au bruit blanc historique
+// utilisé en Play/Effets.
+uint16_t noiseLfsrState = 0xACE1u;
+
+float previousWhiteNorm = 0.0f;
+
+// États du filtre spectral Pink (Paul Kellet).
+float pinkB0 = 0.0f;
+float pinkB1 = 0.0f;
+float pinkB2 = 0.0f;
+float pinkB3 = 0.0f;
+float pinkB4 = 0.0f;
+float pinkB5 = 0.0f;
+float pinkB6 = 0.0f;
+
+// Intégrateur Brown alimenté par le signal Pink.
+float brownState = 0.0f;
+
+// Sample & Hold à 12 kHz, indépendant du séquenceur.
+uint8_t sampleHoldCounter = 0;
+int16_t sampleHoldValue = 0;
+
+// Glitch : les décisions sont tirées dans le même flux LFSR.
+uint32_t glitchCounter = 0;
+bool glitchActive = true;
+
 // ----------------------------------------------------
 // Paramètres des effets Rust / Corrosion
 // ----------------------------------------------------
@@ -750,6 +818,159 @@ int16_t GenerateWhiteNoise()
     return static_cast<int16_t>(
         static_cast<int32_t>(x & 0x03FFu) - 512
     );
+}
+
+// ----------------------------------------------------
+// Noise Morph : une source LFSR, un réseau de traitement
+// ----------------------------------------------------
+
+int16_t GenerateNoiseMorph(int32_t morphValue)
+{
+    // Un mot de 10 bits est construit à partir du flux LFSR.
+    // Le premier bit sert aussi au mode LFSR brut.
+    uint16_t word = 0;
+    uint8_t firstBit = 0;
+
+    for (int i = 0; i < 10; ++i)
+    {
+        const uint16_t bit = noiseLfsrState & 1u;
+
+        noiseLfsrState = static_cast<uint16_t>(
+            (noiseLfsrState >> 1)
+            ^ (bit ? 0xB400u : 0u)
+        );
+
+        if (i == 0)
+            firstBit = static_cast<uint8_t>(bit);
+
+        word = static_cast<uint16_t>((word << 1) | bit);
+    }
+
+    const int16_t whiteSample = static_cast<int16_t>(
+        static_cast<int32_t>(word & 0x03FFu) - 512
+    );
+
+    const float white =
+        static_cast<float>(whiteSample) / 512.0f;
+
+    const float lfsrRaw = firstBit ? 1.0f : -1.0f;
+
+    // Blue : dérivée première du même flux blanc.
+    const float blue =
+        (white - previousWhiteNorm) * 0.70710678f;
+    previousWhiteNorm = white;
+
+    // Pink : filtre spectral multi-pôles, alimenté par le même flux.
+    pinkB0 = 0.99886f * pinkB0 + white * 0.0555179f;
+    pinkB1 = 0.99332f * pinkB1 + white * 0.0750759f;
+    pinkB2 = 0.96900f * pinkB2 + white * 0.1538520f;
+    pinkB3 = 0.86650f * pinkB3 + white * 0.3104856f;
+    pinkB4 = 0.55000f * pinkB4 + white * 0.5329522f;
+    pinkB5 = -0.7616f * pinkB5 - white * 0.0168980f;
+    pinkB6 = white * 0.115926f;
+
+    const float pink =
+        (pinkB0 + pinkB1 + pinkB2 + pinkB3
+         + pinkB4 + pinkB5 + pinkB6 + white * 0.5362f) * 0.11f;
+
+    // Brown : intégration avec fuite du signal Pink.
+    brownState = brownState * 0.9995f + pink * 0.0158114f;
+
+    // S&H : capture toutes les deux périodes audio (12 kHz à 24 kHz).
+    if (++sampleHoldCounter >= 2)
+    {
+        sampleHoldCounter = 0;
+        sampleHoldValue = whiteSample;
+    }
+
+    const float sampleHold =
+        static_cast<float>(sampleHoldValue) / 512.0f;
+
+    // Le compteur et les décisions de rafale proviennent du même mot LFSR.
+    if (glitchCounter == 0)
+    {
+        glitchActive = true; // aucune coupure au début de chaque rafale
+        glitchCounter = 1u + ((word >> 8) % 48u);
+    }
+    else
+    {
+        --glitchCounter;
+        // La probabilité de coupure est modulée par la position de morph.
+        const int32_t glitchStart = 3072;
+        const int32_t glitchEnd = 4095;
+        int32_t glitchAmount = morphValue - glitchStart;
+        if (glitchAmount < 0) glitchAmount = 0;
+        if (glitchAmount > glitchEnd - glitchStart)
+            glitchAmount = glitchEnd - glitchStart;
+
+        const uint32_t threshold =
+            static_cast<uint32_t>(glitchAmount) * 192u
+            / static_cast<uint32_t>(glitchEnd - glitchStart);
+
+        if ((word & 0x00FFu) < threshold)
+            glitchActive = false;
+    }
+
+    const float glitch = glitchActive ? sampleHold : 0.0f;
+
+    if (morphValue < 0) morphValue = 0;
+    if (morphValue > 4095) morphValue = 4095;
+
+    // Sept zones continues. On transforme toujours le même flux :
+    // aucun second générateur, aucune banque de bruits indépendants.
+    float output = white;
+
+    if (morphValue < 1024)
+    {
+        // Blue -> White : la quantité de dérivation diminue jusqu'au bypass.
+        const float position = static_cast<float>(morphValue) / 1024.0f;
+        const float highPassAmount = 1.0f - position;
+        output = white - highPassAmount * previousWhiteNorm;
+        output *= 0.70710678f;
+    }
+    else if (morphValue < 2048)
+    {
+        // White -> Pink : le réseau spectral Pink entre progressivement
+        // dans le trajet du signal, toujours à partir de la même source.
+        const float position =
+            static_cast<float>(morphValue - 1024) / 1024.0f;
+        output = white + (pink - white) * position;
+    }
+    else if (morphValue < 3072)
+    {
+        // Pink -> Brown : montée progressive de l'intégration avec fuite.
+        const float position =
+            static_cast<float>(morphValue - 2048) / 1024.0f;
+        output = pink + (brownState - pink) * position;
+    }
+    else if (morphValue < 3413)
+    {
+        // Brown -> LFSR : réduction progressive du traitement spectral
+        // jusqu'au flux binaire brut du registre.
+        const float position =
+            static_cast<float>(morphValue - 3072) / 341.0f;
+        output = brownState + (lfsrRaw - brownState) * position;
+    }
+    else if (morphValue < 3754)
+    {
+        // LFSR -> Sample & Hold : même source, maintien à 12 kHz.
+        const float position =
+            static_cast<float>(morphValue - 3413) / 341.0f;
+        output = lfsrRaw + (sampleHold - lfsrRaw) * position;
+    }
+    else
+    {
+        // Sample & Hold -> Glitch : apparition progressive des coupures.
+        const float position =
+            static_cast<float>(morphValue - 3754) / 341.0f;
+        output = sampleHold + (glitch - sampleHold) * position;
+    }
+
+    // Conservation du niveau audio modéré utilisé par le firmware stable.
+    if (output > 1.0f) output = 1.0f;
+    if (output < -1.0f) output = -1.0f;
+
+    return static_cast<int16_t>(output * 512.0f);
 }
 
 /// ----------------------------------------------------
@@ -996,6 +1217,12 @@ int32_t xPickupTarget = 0;
 bool mainPickupActive = false;
 bool xPickupActive = false;
 bool controlPickupInitialized = false;
+
+// Noise Morph : valeur mémorisée et pickup de Y en Z UP.
+int32_t noiseMorphValue = 0;
+int32_t noisePickupTarget = 0;
+bool noisePickupActive = false;
+bool noiseMorphInitialized = false;
 
     uint32_t internalCounter = 0;
     uint32_t internalLedCounter = 0;
