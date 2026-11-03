@@ -48,6 +48,10 @@ struct ProcessSampleTimingBucket
     std::atomic<uint32_t> intervalSumUs{0};
     std::atomic<uint32_t> intervalMaxUs{0};
     std::atomic<uint32_t> overBudgetCount{0};
+    std::atomic<uint32_t> bufferDurationCount{0};
+    std::atomic<uint32_t> bufferDurationSumUs{0};
+    std::atomic<uint32_t> bufferDurationMaxUs{0};
+    std::atomic<uint32_t> bufferOverBudgetCount{0};
 };
 
 static ProcessSampleTimingBucket timingBuckets[3];
@@ -87,6 +91,24 @@ static void RecordProcessSampleTiming(
         bucket.overBudgetCount.fetch_add(1, std::memory_order_relaxed);
 }
 
+bool TimingDiagnosticsActive()
+{
+    return timingDiagnosticsEnabled.load(std::memory_order_relaxed);
+}
+
+void RecordBufferFullTiming(uint8_t modeIndex, uint32_t durationUs)
+{
+    if (!timingDiagnosticsEnabled.load(std::memory_order_relaxed) || modeIndex >= 3)
+        return;
+
+    ProcessSampleTimingBucket &bucket = timingBuckets[modeIndex];
+    bucket.bufferDurationCount.fetch_add(1, std::memory_order_relaxed);
+    bucket.bufferDurationSumUs.fetch_add(durationUs, std::memory_order_relaxed);
+    UpdateAtomicMax(bucket.bufferDurationMaxUs, durationUs);
+    if (durationUs > 41u)
+        bucket.bufferOverBudgetCount.fetch_add(1, std::memory_order_relaxed);
+}
+
 static void ResetTimingDiagnostics()
 {
     for (auto &bucket : timingBuckets)
@@ -98,6 +120,10 @@ static void ResetTimingDiagnostics()
         bucket.intervalSumUs.store(0, std::memory_order_relaxed);
         bucket.intervalMaxUs.store(0, std::memory_order_relaxed);
         bucket.overBudgetCount.store(0, std::memory_order_relaxed);
+        bucket.bufferDurationCount.store(0, std::memory_order_relaxed);
+        bucket.bufferDurationSumUs.store(0, std::memory_order_relaxed);
+        bucket.bufferDurationMaxUs.store(0, std::memory_order_relaxed);
+        bucket.bufferOverBudgetCount.store(0, std::memory_order_relaxed);
     }
 }
 
@@ -125,6 +151,14 @@ static void SendTimingDiagnostics()
             bucket.intervalMaxUs.exchange(0, std::memory_order_relaxed);
         const uint32_t overBudget =
             bucket.overBudgetCount.exchange(0, std::memory_order_relaxed);
+        const uint32_t bufferCount =
+            bucket.bufferDurationCount.exchange(0, std::memory_order_relaxed);
+        const uint32_t bufferDurationSum =
+            bucket.bufferDurationSumUs.exchange(0, std::memory_order_relaxed);
+        const uint32_t bufferDurationMax =
+            bucket.bufferDurationMaxUs.exchange(0, std::memory_order_relaxed);
+        const uint32_t bufferOverBudget =
+            bucket.bufferOverBudgetCount.exchange(0, std::memory_order_relaxed);
 
         if (samples == 0)
             continue;
@@ -133,7 +167,8 @@ static void SendTimingDiagnostics()
         const int length = std::snprintf(
             line, sizeof(line),
             "TIMING,%s,n=%lu,dur_avg=%lu,dur_max=%lu,"
-            "period_avg=%lu,period_max=%lu,over41=%lu\r\n",
+            "period_avg=%lu,period_max=%lu,over41=%lu,"
+            "buffer_avg=%lu,buffer_max=%lu,buffer_over41=%lu\r\n",
             modeNames[i],
             static_cast<unsigned long>(samples),
             static_cast<unsigned long>(durationSum / samples),
@@ -141,7 +176,10 @@ static void SendTimingDiagnostics()
             static_cast<unsigned long>(
                 intervals ? intervalSum / intervals : 0),
             static_cast<unsigned long>(intervalMax),
-            static_cast<unsigned long>(overBudget));
+            static_cast<unsigned long>(overBudget),
+            static_cast<unsigned long>(bufferCount ? bufferDurationSum / bufferCount : 0),
+            static_cast<unsigned long>(bufferDurationMax),
+            static_cast<unsigned long>(bufferOverBudget));
 
         if (length > 0
             && static_cast<uint32_t>(length) <= tud_cdc_write_available())
