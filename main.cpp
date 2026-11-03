@@ -133,7 +133,7 @@ static void SendTimingDiagnostics()
         const int length = std::snprintf(
             line, sizeof(line),
             "TIMING,%s,n=%lu,dur_avg=%lu,dur_max=%lu,"
-            "period_avg=%lu,period_max=%lu,over41=%lu\\r\\n",
+            "period_avg=%lu,period_max=%lu,over41=%lu\r\n",
             modeNames[i],
             static_cast<unsigned long>(samples),
             static_cast<unsigned long>(durationSum / samples),
