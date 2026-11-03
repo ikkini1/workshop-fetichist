@@ -195,29 +195,32 @@ const float mixedOutput =
 
 
 
-const float dryWet = effectsDryWet;
+// Les effets ne sont actifs qu'en position Z DOWN.
+// Hors de ce mode, on les contourne complètement : cela évite
+// d'exécuter powf() et tanhf() dans le moteur audio pour rien.
+const float dryWet = (mode == Down) ? effectsDryWet : 0.0f;
 const float effectMix = rustCorrosionMix;
-// Signal original.
-const float drySignal = mixedOutput;
 
-// ----------------------------------------------------
-// Traitement parallèle Rust / Corrosion
-// ----------------------------------------------------
+// Par défaut, le signal reste entièrement sec.
+float effectOutput = mixedOutput;
 
-// Intensité interne fixe de chaque effet.
-const float rustSignal = ProcessRust(mixedOutput, 1.0f) * 0.708f;
-const float corrosionSignal = ProcessCorrosion(mixedOutput, 0.55f) * 0.708f;
+if (dryWet > 0.0f)
+{
+    // Intensité interne fixe de chaque effet.
+    const float rustSignal = ProcessRust(mixedOutput, 1.0f) * 0.708f;
+    const float corrosionSignal = ProcessCorrosion(mixedOutput, 0.55f) * 0.708f;
 
-// X dose le mélange entre Rust et Corrosion.
-// À gauche : Rust. À droite : Corrosion.
-const float processedSignal =
-    rustSignal * (1.0f - effectMix)
-    + corrosionSignal * effectMix;
+    // X dose le mélange entre Rust et Corrosion.
+    // À gauche : Rust. À droite : Corrosion.
+    const float processedSignal =
+        rustSignal * (1.0f - effectMix)
+        + corrosionSignal * effectMix;
 
-// Mélange entre signal original et signal traité.
-const float effectOutput =
-    drySignal * (1.0f - dryWet)
-    + processedSignal * dryWet;
+    // Mélange entre signal original et signal traité.
+    effectOutput =
+        mixedOutput * (1.0f - dryWet)
+        + processedSignal * dryWet;
+}
 
 // Sortie principale.
 int32_t finalOutput = static_cast<int32_t>(effectOutput);
@@ -818,6 +821,8 @@ float brownState = 0.0f;
 // Sample & Hold à 12 kHz, indépendant du séquenceur.
 uint16_t sampleHoldCounter = 0;
 int16_t sampleHoldValue = 0;
+int32_t sampleHoldControlCached = -1;
+uint32_t sampleHoldPeriodCached = 2;
 
 // Glitch : les décisions sont tirées dans le même flux LFSR.
 uint32_t glitchCounter = 0;
@@ -910,19 +915,27 @@ int16_t GenerateNoiseMorph(int32_t morphValue, int32_t yControlValue)
 
     // S&H : 12 kHz au début de la zone dédiée, puis ralentissement
     // progressif sur les derniers 10 % de la course de Y jusqu'à 1 Hz.
-    const int32_t slowZoneStart = 3686;
-    const int32_t slowZoneRange = 4095 - slowZoneStart;
-    int32_t slowAmount = yControlValue - slowZoneStart;
-    if (slowAmount < 0) slowAmount = 0;
-    if (slowAmount > slowZoneRange) slowAmount = slowZoneRange;
+    // Le calcul de la période ne change que lorsque Y change.
+    // On le met donc en cache au lieu d'effectuer une division 64 bits
+    // à chaque échantillon audio.
+    if (yControlValue != sampleHoldControlCached)
+    {
+        const int32_t slowZoneStart = 3686;
+        const int32_t slowZoneRange = 4095 - slowZoneStart;
+        int32_t slowAmount = yControlValue - slowZoneStart;
+        if (slowAmount < 0) slowAmount = 0;
+        if (slowAmount > slowZoneRange) slowAmount = slowZoneRange;
 
-    const uint32_t sampleHoldPeriod = 2u +
-        static_cast<uint32_t>(
-            (static_cast<uint64_t>(23998u) * slowAmount * slowAmount) /
-            (static_cast<uint64_t>(slowZoneRange) * slowZoneRange)
-        );
+        sampleHoldPeriodCached = 2u +
+            static_cast<uint32_t>(
+                (static_cast<uint64_t>(23998u) * slowAmount * slowAmount) /
+                (static_cast<uint64_t>(slowZoneRange) * slowZoneRange)
+            );
 
-    if (++sampleHoldCounter >= sampleHoldPeriod)
+        sampleHoldControlCached = yControlValue;
+    }
+
+    if (++sampleHoldCounter >= sampleHoldPeriodCached)
     {
         sampleHoldCounter = 0;
         sampleHoldValue = whiteSample;
