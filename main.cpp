@@ -333,11 +333,9 @@ if (previousMode == Up && mode == Middle)
 {
     mainPickupTarget = sequencerMainValue;
     xPickupTarget = sequencerXValue;
-    skipPickupTarget = skipValue;
 
     mainPickupActive = true;
     xPickupActive = true;
-    skipPickupActive = true;
 }
 
 // En mode Play, les potentiomètres doivent retrouver
@@ -385,6 +383,14 @@ if (!skipValueInitialized)
     tempoPickupActive = (mode == Down);
 
     skipValueInitialized = true;
+}
+
+// Le retour de Stop vers Play réactive aussi le pickup de Y,
+// mais seulement après l'initialisation de sa valeur mémorisée.
+if (previousMode == Up && mode == Middle)
+{
+    skipPickupTarget = skipValue;
+    skipPickupActive = true;
 }
 
 // Passage de Play à Tempo.
