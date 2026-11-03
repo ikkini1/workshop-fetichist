@@ -660,8 +660,12 @@ void __not_in_flash_func(ComputerCard::CorrectADCDNL)(uint16_t &value) const
 // Per-audio-sample ISR, called when two sets of ADC samples have been collected from all four inputs
 void __not_in_flash_func(ComputerCard::BufferFull)()
 {
+	static uint32_t diagnosticDivider = 0;
 	const bool timingEnabled = TimingDiagnosticsActive();
-	const uint32_t bufferStartUs = timingEnabled ? time_us_32() : 0u;
+	const bool measureThisCallback =
+		timingEnabled && ((++diagnosticDivider & 0x7Fu) == 0u);
+	const uint32_t bufferStartUs =
+		measureThisCallback ? time_us_32() : 0u;
 
 	static int startupCounter = 8; // Decreases by 1 each sample, can do startup things when nonzero.
 	static int mux_state = 0;
@@ -838,7 +842,7 @@ void __not_in_flash_func(ComputerCard::BufferFull)()
 
 	lastSwitchVal = switchVal;
 
-	if (timingEnabled)
+	if (measureThisCallback)
 	{
 		const uint8_t modeIndex =
 			(switchVal == Down) ? 0u : ((switchVal == Middle) ? 1u : 2u);
